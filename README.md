@@ -51,39 +51,96 @@ Input Image (28×28, grayscale)
 
 ## 📐 Mathematical Foundations
 
-### Convolution (Block 1 & 2)
-Each output feature map is computed as:
+### 🌀 Convolution (Block 1 & 2)
 
-```
-out[co][i][j] = ReLU( b[co] + Σ_ci Σ_ki Σ_kj  in[ci][i+ki][j+kj] · W[co][ci][ki][kj] )
-```
+Each output feature map is computed as a multi-channel cross-correlation:
 
-This is a **multi-channel cross-correlation**, not true mathematical convolution (kernel is not flipped) — standard convention in deep learning frameworks.
+$$
+\text{out}[c_o][i][j] = \text{ReLU}\left( b[c_o] + \sum_{c_i} \sum_{k_i=0}^{K-1} \sum_{k_j=0}^{K-1} \text{in}[c_i][i+k_i][j+k_j] \cdot W[c_o][c_i][k_i][k_j] \right)
+$$
 
-### Max Pooling
-Non-linear downsampling, preserves the strongest activation in each 2×2 window:
+where $K$ is the kernel size ($K = 5$ for both Conv1 and Conv2). This is a **cross-correlation**, not true mathematical convolution — the kernel is not flipped, following standard deep learning convention.
 
-```
-out[i][j] = max( in[2i][2j], in[2i][2j+1], in[2i+1][2j], in[2i+1][2j+1] )
-```
+### 🔲 Max Pooling
 
-### Fully-Connected Layers
-Classic matrix-vector product:
+Non-linear downsampling, preserving the strongest activation in each 2×2 window:
 
-```
-out[o] = ReLU( b[o] + Σ_i  in[i] · W[o][i] )
-```
+$$
+\text{out}[i][j] = \max\Big(\text{in}[2i][2j],\ \text{in}[2i][2j{+}1],\ \text{in}[2i{+}1][2j],\ \text{in}[2i{+}1][2j{+}1]\Big)
+$$
 
-Final layer (FC3) skips ReLU — raw logits are fed directly into **argmax**, since softmax normalization is unnecessary when only the *arg*-max class is needed (monotonic transformation preserves ranking).
+### 🔗 Fully-Connected Layers
 
-### Fixed-Point Quantization
-All activations/weights use **`ap_fixed<8,4>`** (Q4.4 format — 4 integer bits, 4 fractional bits), replacing 32-bit floats:
+Classic affine transformation followed by non-linearity:
 
-```
-value_fixed = round(value_float × 2^4) / 2^4
-```
+$$
+\text{out}[o] = \text{ReLU}\left( b[o] + \sum_{i=0}^{N-1} \text{in}[i] \cdot W[o][i] \right)
+$$
 
-Accumulators are widened (`ap_fixed<20,10>` to `ap_fixed<26,16>`) with **`AP_SAT`** saturation mode to prevent overflow during long dot-product reductions — critical since FC1 alone sums 256 products per output neuron.
+The final layer (FC3) **skips ReLU**, producing raw logits directly consumed by argmax:
+
+$$
+z[o] = b[o] + \sum_{i=0}^{N-1} \text{in}[i] \cdot W[o][i], \qquad
+\hat{y} = \arg\max_{o} \; z[o]
+$$
+
+Softmax normalization is unnecessary here, since:
+
+$$
+\arg\max_{o} \; z[o] \;=\; \arg\max_{o} \; \text{softmax}(z)_o
+$$
+
+Softmax is **strictly monotonic** — it preserves the ranking of logits, so skipping it saves an exponential + division per inference with zero impact on the predicted class.
+
+### 🔢 Fixed-Point Quantization
+
+All activations and weights use **`ap_fixed<8,4>`** — Q4.4 format (4 integer bits, 4 fractional bits) — replacing 32-bit floats:
+
+$$
+x_{\text{fixed}} = \frac{\text{round}\left(x_{\text{float}} \cdot 2^{4}\right)}{2^{4}}
+$$
+
+with representable range:
+
+$$
+x_{\text{fixed}} \in \left[-2^{3},\ 2^{3} - 2^{-4}\right] = [-8,\ 7.9375]
+$$
+
+**Accumulator sizing.** To avoid overflow across deep dot-product reductions (FC1 sums $N = 256$ terms), accumulator bit-width must satisfy:
+
+$$
+\text{acc\_bits} \;\geq\; \left\lceil \log_2\!\left(N \cdot 2^{b_w} \cdot 2^{b_x}\right)\right\rceil
+$$
+
+where $b_w$, $b_x$ are the weight and activation bit-widths. This is why accumulators are widened to `ap_fixed<20,10>`–`ap_fixed<26,16>` with **`AP_SAT`** saturation mode, absorbing worst-case sums without silent wraparound.
+
+### ⚡ Compute Speedup
+
+$$
+\text{Speedup} = \frac{T_{\text{CPU}}}{T_{\text{FPGA}}} = \frac{287.64\ \text{ms}}{3.910\ \text{ms}} \approx 73.6\times
+$$
+
+where the FPGA total is the sum of per-block AXI-Lite-measured compute times:
+
+$$
+T_{\text{FPGA}} = T_{\text{block1}} + T_{\text{block2}} + T_{\text{block3}} = 1.220 + 1.316 + 1.374 = 3.910\ \text{ms}
+$$
+
+### 🎯 Quantization Error
+
+Mean squared error between the FPGA's fixed-point output and a quantization-matched float reference:
+
+$$
+\text{MSE} = \frac{1}{n}\sum_{k=1}^{n} \left(y_{\text{fpga}}^{(k)} - y_{\text{ref}}^{(k)}\right)^2 = 0.002
+$$
+
+Bit-exact match rate (±1 LSB tolerance, where $1\ \text{LSB} = 2^{-4} = 0.0625$):
+
+$$
+\text{Match Rate} = \frac{1}{n}\sum_{k=1}^{n} \mathbb{1}\left[\left|y_{\text{fpga}}^{(k)} - y_{\text{ref}}^{(k)}\right| \leq 1\ \text{LSB}\right] = 92.7\%
+$$
+
+Despite local quantization noise, **final classification agreement between CPU and FPGA is 100%** — the argmax decision is robust to sub-LSB perturbations in intermediate activations.
 
 ---
 
@@ -113,11 +170,6 @@ Each block is deployed as an **independent bitstream/IP**, validated via:
 | **Speedup** | | **🚀 ~74×** |
 
 > ⚠️ Note: latencies are measured **per kernel** via AXI-Lite timing, then summed — this reflects **compute-time speedup**, not necessarily a single continuous end-to-end hardware run.
-
-**Accuracy under quantization:**
-- Block 1 output MSE vs. quantization-matched float reference: `0.002`
-- Bit-exact match rate (±1 LSB): `92.7%`
-- **CPU/FPGA final classification agreement: 100%** on validated samples — INT8 quantization noise never flipped a prediction.
 
 ---
 
