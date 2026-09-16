@@ -109,7 +109,7 @@ $$
 **Accumulator sizing.** To avoid overflow across deep dot-product reductions (FC1 sums $N = 256$ terms), accumulator bit-width must satisfy:
 
 $$
-\text{acc\_bits} \;\geq\; \left\lceil \log_2\!\left(N \cdot 2^{b_w} \cdot 2^{b_x}\right)\right\rceil
+\text{acc\_bits} \geq \lceil \log_2(N \cdot 2^{b_w} \cdot 2^{b_x}) \rceil
 $$
 
 where $b_w$, $b_x$ are the weight and activation bit-widths. This is why accumulators are widened to `ap_fixed<20,10>`–`ap_fixed<26,16>` with **`AP_SAT`** saturation mode, absorbing worst-case sums without silent wraparound.
